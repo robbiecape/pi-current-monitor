@@ -21,11 +21,14 @@
 
 ### Board 2 (Current Monitor)
 - **MAC Address:** 781C3CCB7270
-- **CT_RATIO:** 31.0
+- **CT_RATIO:** 31.4
 - **Calibration Date:** Oct 24, 2025
-- **Test Current:** 8.28A actual, 9.4A reading before calibration
-- **Calibration Factor:** 1.135
-- **Notes:** Second ESP32 board, requires lower CT_RATIO
+- **Test Current:** 8.3A actual (final calibration point)
+- **Calibration History:**
+  - Initial: 35.2 → 9.4A reading (8.28A actual)
+  - First adjustment: 31.0 → 8.2A reading (8.3A actual)
+  - Final: 31.4 → accurate at 8.3A
+- **Notes:** Second ESP32 board, requires lower CT_RATIO than board 1
 
 ---
 

@@ -26,7 +26,7 @@ struct DeviceCalibration {
 };
 
 DeviceCalibration calibrations[] = {
-  {"781C3CCB7270", 31.0},  // Board 2 - Calibrated Oct 24, 2025
+  {"781C3CCB7270", 31.4},  // Board 2 - Calibrated Oct 24, 2025 (8.2A→8.3A actual)
   // {"XXXXXXXXXXXX", 35.2},  // Board 1 - Original calibration (MAC TBD)
 };
 
