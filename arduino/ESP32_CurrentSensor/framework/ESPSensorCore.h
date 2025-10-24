@@ -381,6 +381,9 @@ private:
   }
 
   void setupWiFi() {
+    // Reduce WiFi power to prevent brownout on weak power supplies
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);  // Lowest power setting
+
     // Load saved configuration
     preferences.begin("sensor", false);
     deviceName = preferences.getString("deviceName", getDefaultDeviceName());

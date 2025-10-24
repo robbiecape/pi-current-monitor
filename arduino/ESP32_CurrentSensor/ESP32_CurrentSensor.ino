@@ -5,6 +5,8 @@
  * Uses ESP32 Sensor Framework for WiFi, MQTT, and data buffering
  */
 
+#include <Preferences.h>
+#include <WiFiManager.h>
 #include "framework/ESPSensorCore.h"
 
 // ============================================================================
@@ -34,6 +36,9 @@ float CT_RATIO = 35.2;  // Default if not found in calibration table
 
 // Framework instance
 ESPSensorCore framework;
+
+// Preferences for reset functionality
+Preferences preferences;
 
 // ===== CURRENT SENSING FUNCTIONS =====
 
