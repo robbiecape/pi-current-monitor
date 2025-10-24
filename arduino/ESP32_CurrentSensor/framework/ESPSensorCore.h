@@ -437,7 +437,7 @@ private:
 
     // Connect to WiFi
     Serial.println("Connecting to WiFi...");
-    if (!wifiManager.autoConnect(("ESP32-" + deviceName).c_str())) {
+    if (!wifiManager.autoConnect(("ESP32-" + deviceName).c_str(), CONFIG_PORTAL_PASSWORD)) {
       Serial.println("Failed to connect to WiFi");
       ESP.restart();
     }

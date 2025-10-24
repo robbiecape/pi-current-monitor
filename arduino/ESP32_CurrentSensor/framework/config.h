@@ -26,6 +26,7 @@
 // WiFi Configuration
 #define WIFI_CONNECT_TIMEOUT 30000  // 30 seconds to connect
 #define CONFIG_PORTAL_TIMEOUT 0     // 0 = blocking portal (wait forever)
+#define CONFIG_PORTAL_PASSWORD "Capefamily1"  // Password for configuration AP
 
 // Data Publishing
 #define PUBLISH_INTERVAL_CONNECTED 5000    // Publish every 5 seconds when connected
