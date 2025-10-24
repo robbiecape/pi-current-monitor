@@ -332,6 +332,9 @@ private:
   unsigned long lastBufferUpload;
   String currentUploadFile;
 
+  // Status publishing
+  unsigned long lastStatusPublish;
+
   // ==========================================================================
   // PRIVATE METHODS
   // ==========================================================================
@@ -823,6 +826,11 @@ private:
     Serial.println("Published status information");
   }
 
+  void publishWiFiSignal() {
+    // Publish only WiFi signal quality
+    mqttClient.publish((deviceName + "/status/wifi_signal").c_str(), getWiFiQuality(WiFi.RSSI()).c_str(), false);
+  }
+
 public:
   ESPSensorCore() :
     mqttClient(espClient),
@@ -842,6 +850,7 @@ public:
     isUploadingBuffer(false),
     uploadIterator(nullptr),
     lastBufferUpload(0),
+    lastStatusPublish(0),
     customDeviceName(nullptr),
     customMqttBroker(nullptr) {}
 
@@ -882,6 +891,13 @@ public:
       // Upload buffered data if available
       if (isUploadingBuffer) {
         uploadBufferedData();
+      }
+
+      // Publish WiFi signal status periodically
+      unsigned long now = millis();
+      if (now - lastStatusPublish >= STATUS_PUBLISH_INTERVAL) {
+        publishWiFiSignal();
+        lastStatusPublish = now;
       }
     }
 

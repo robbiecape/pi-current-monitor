@@ -30,6 +30,7 @@
 // Data Publishing
 #define PUBLISH_INTERVAL_CONNECTED 5000    // Publish every 5 seconds when connected
 #define PUBLISH_INTERVAL_BUFFERING 30000   // Store every 30 seconds when disconnected
+#define STATUS_PUBLISH_INTERVAL 10000      // Publish WiFi signal status every 10 seconds
 
 // Local Buffering
 #define BUFFER_MAX_SIZE 512000      // 500KB max buffer size
