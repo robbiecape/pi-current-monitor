@@ -750,6 +750,7 @@ private:
 
     webServer->on("/", [this]() {
       String html = "<!DOCTYPE html><html><head>";
+      html += "<meta charset='UTF-8'>";
       html += "<title>" + deviceName + "</title>";
       html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
       html += "<style>body{font-family:monospace;margin:20px;background:#f0f0f0;}";
