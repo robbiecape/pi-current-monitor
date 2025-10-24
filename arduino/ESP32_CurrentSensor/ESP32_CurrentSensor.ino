@@ -17,10 +17,20 @@
 #define SAMPLE_RATE 4000    // Target samples per second (adjust based on testing)
 #define ADC_BITS 4096       // 12-bit ADC (0-4095)
 #define ADC_VOLTAGE 3.3     // ESP32 ADC reference voltage
-#define CT_RATIO 35.2       // CT ratio calibrated for this circuit (see README)
 
-// Calibration constant
-float currentCalibration = (CT_RATIO * ADC_VOLTAGE) / ADC_BITS;  // Amps per ADC count
+// Per-device CT calibration
+// See CALIBRATION.md for calibration procedure and history
+struct DeviceCalibration {
+  const char* mac;
+  float ctRatio;
+};
+
+DeviceCalibration calibrations[] = {
+  {"781C3CCB7270", 31.0},  // Board 2 - Calibrated Oct 24, 2025
+  // {"XXXXXXXXXXXX", 35.2},  // Board 1 - Original calibration (MAC TBD)
+};
+
+float CT_RATIO = 35.2;  // Default if not found in calibration table
 
 // Framework instance
 ESPSensorCore framework;
@@ -123,6 +133,31 @@ void setup() {
 
   // Initialize framework (handles WiFi, MQTT, buffering, web server)
   framework.begin();
+
+  // Load device-specific CT calibration
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  String deviceMAC = "";
+  for(int i = 0; i < 6; i++) {
+    if(mac[i] < 16) deviceMAC += "0";
+    deviceMAC += String(mac[i], HEX);
+  }
+  deviceMAC.toUpperCase();
+
+  // Look up calibration for this MAC
+  bool foundCalibration = false;
+  for (int i = 0; i < sizeof(calibrations) / sizeof(calibrations[0]); i++) {
+    if (deviceMAC.equals(calibrations[i].mac)) {
+      CT_RATIO = calibrations[i].ctRatio;
+      foundCalibration = true;
+      Serial.printf("Loaded calibration for MAC %s: CT_RATIO = %.1f\n", deviceMAC.c_str(), CT_RATIO);
+      break;
+    }
+  }
+
+  if (!foundCalibration) {
+    Serial.printf("No calibration found for MAC %s, using default CT_RATIO = %.1f\n", deviceMAC.c_str(), CT_RATIO);
+  }
 
   Serial.println("Current monitor ready - GPIO34");
 }
