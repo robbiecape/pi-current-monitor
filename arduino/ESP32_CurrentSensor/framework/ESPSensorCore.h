@@ -905,9 +905,10 @@ public:
       }
     }
 
-    if (webServer) {
-      webServer->handleClient();
-    }
+    // TEMPORARILY DISABLED for brownout testing
+    // if (webServer) {
+    //   webServer->handleClient();
+    // }
   }
 
   bool shouldPublish() {
