@@ -1,0 +1,612 @@
+#include <WiFi.h>
+#include <WiFiManager.h>
+#include <PubSubClient.h>
+#include <ESPmDNS.h>
+#include <Preferences.h>
+#include <HTTPClient.h>
+#include <time.h>
+
+// Firmware Version
+#define MAJOR_VERSION "1.0"
+#define BUILD_DATE __DATE__
+#define BUILD_TIME __TIME__
+
+/*
+ * ============================================================================
+ * TESTING MODE - TEMPORARY MODIFICATIONS
+ * ============================================================================
+ * This code has been modified for testing/debugging. Before deploying to 
+ * production, search for "TEMPORARILY" and re-enable all commented sections:
+ * 
+ * 1. WiFi credentials hardcoded (line ~175) - Re-enable WiFiManager
+ * 2. MQTT broker hardcoded (line ~150) - Re-enable preferences loading  
+ * 3. Auto-reset on boot failures disabled (line ~160) - Re-enable
+ * 4. Auto-reset on MQTT failures disabled (line ~380) - Re-enable
+ * 
+ * Search for "TEMPORARILY" to find all modified sections.
+ * ============================================================================
+ */
+
+// Current Sensor Setup
+#define CT_PIN 34           // GPIO34 (ADC1_CH6) - connected to CT sensor
+#define SAMPLES 2000        // Number of samples to read for RMS calculation
+#define SAMPLE_RATE 4000    // Target samples per second (adjust based on testing)
+#define ADC_BITS 4096       // 12-bit ADC (0-4095)
+#define ADC_VOLTAGE 3.3     // ESP32 ADC reference voltage
+#define CT_RATIO 35.2      // CT ratio: 50A primary / 1V secondary (from SCT013-000V)
+
+// Calibration constant - YOU WILL NEED TO ADJUST THIS
+// Start with calculated value, then fine-tune against known load
+float currentCalibration = (CT_RATIO * ADC_VOLTAGE) / ADC_BITS;  // Amps per ADC count
+
+// LED Setup (built-in LED)
+#define LED_PIN 2
+enum LedMode { LED_BOOT, LED_NORMAL, LED_FAST_RETRY, LED_SLOW_RETRY };
+LedMode currentLedMode = LED_BOOT;
+unsigned long lastLedToggle = 0;
+bool ledState = false;
+
+// MQTT Configuration
+String mqtt_server = "";
+const int mqtt_port = 1883;
+
+// Preferences for persistent storage
+Preferences preferences;
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// Variables to store readings
+float currentAmps = 0;
+String deviceMAC;
+String baseTopic;
+
+// Timing
+unsigned long lastPublish = 0;
+const long publishInterval = 5000;  // Publish every 5 seconds (faster for current monitoring)
+
+// NTP Time Configuration
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 0;
+const int daylightOffset_sec = 0;
+bool timeIsSynced = false;
+
+// Global variables
+WiFiManagerParameter* custom_mqtt_broker = nullptr;
+bool shouldSaveConfig = false;
+bool everConnected = false;
+
+// AWS Heartbeat for failure notifications
+const char* awsHeartbeatUrl = "https://heartbeat.gooddecisionsmi.com/hb/32370e9e9064af59482f57365150b93c4207437f007c5dd16167a48d3905c049/";
+bool failureNotificationSent = false;
+
+void saveConfigCallback() {
+  Serial.println("Configuration saved callback triggered");
+  shouldSaveConfig = true;
+}
+
+String discoverMQTTBrokers() {
+  Serial.println("\n========================================");
+  Serial.println("Scanning for MQTT brokers via mDNS...");
+  Serial.println("========================================");
+
+  if (!MDNS.begin("esp32-sensor")) {
+    Serial.println("Error starting mDNS");
+    return "";
+  }
+
+  int numBrokers = MDNS.queryService("mqtt", "tcp");
+  Serial.printf("\nFound %d MQTT broker(s):\n\n", numBrokers);
+
+  String htmlList = "<div style='background:#e0e0e0;padding:10px;margin:10px 0;border-radius:5px;'>";
+  htmlList += "<h3>Discovered MQTT Brokers:</h3>";
+
+  if (numBrokers == 0) {
+    Serial.println("No MQTT brokers discovered.");
+    Serial.println("You will need to enter the IP manually.");
+    htmlList += "<p>No brokers found. Please enter IP manually.</p>";
+  } else {
+    htmlList += "<ul style='list-style:none;padding:0;'>";
+
+    for (int i = 0; i < numBrokers; i++) {
+      String hostname = MDNS.hostname(i);
+      IPAddress ipAddr = MDNS.address(i);
+      String ip = ipAddr.toString();
+      int port = MDNS.port(i);
+
+      Serial.printf("  [%d] %s\n", i+1, hostname.c_str());
+      Serial.printf("      IP: %s\n", ip.c_str());
+      Serial.printf("      Port: %d\n\n", port);
+
+      htmlList += "<li style='margin:10px 0;padding:10px;background:white;border-radius:3px;'>";
+      htmlList += "<strong>" + hostname + "</strong><br>";
+      htmlList += "IP: <code>" + ip + "</code><br>";
+      htmlList += "Port: " + String(port);
+      htmlList += "</li>";
+    }
+
+    htmlList += "</ul>";
+  }
+
+  htmlList += "</div>";
+  Serial.println("========================================");
+
+  return htmlList;
+}
+
+void updateLED() {
+  unsigned long now = millis();
+
+  switch (currentLedMode) {
+    case LED_BOOT:
+      digitalWrite(LED_PIN, HIGH);
+      break;
+
+    case LED_NORMAL:
+      if (now - lastLedToggle >= 30000) {
+        digitalWrite(LED_PIN, HIGH);
+        lastLedToggle = now;
+      } else if (now - lastLedToggle >= 100) {
+        digitalWrite(LED_PIN, LOW);
+      }
+      break;
+
+    case LED_FAST_RETRY:
+      if (now - lastLedToggle >= 500) {
+        ledState = !ledState;
+        digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+        lastLedToggle = now;
+      }
+      break;
+
+    case LED_SLOW_RETRY:
+      if (now - lastLedToggle >= 30000) {
+        digitalWrite(LED_PIN, HIGH);
+        lastLedToggle = now;
+      } else if (now - lastLedToggle >= 100) {
+        digitalWrite(LED_PIN, LOW);
+      }
+      break;
+  }
+}
+
+void sendFailureNotification() {
+  if (failureNotificationSent) {
+    return;
+  }
+
+  HTTPClient http;
+  String url = String(awsHeartbeatUrl) + "ESP32-" + deviceMAC + "-MQTT-FAILED";
+
+  Serial.println("Sending failure notification to AWS: " + url);
+
+  http.begin(url);
+  int httpCode = http.GET();
+
+  if (httpCode > 0) {
+    Serial.printf("AWS notification sent. Status: %d\n", httpCode);
+    failureNotificationSent = true;
+  } else {
+    Serial.printf("AWS notification failed. Error: %s\n", http.errorToString(httpCode).c_str());
+  }
+
+  http.end();
+}
+
+String getCurrentTimestamp() {
+  if (!timeIsSynced) {
+    return "BOOT+" + String(millis() / 1000);
+  }
+
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    timeIsSynced = false;
+    return "BOOT+" + String(millis() / 1000);
+  }
+
+  char timestamp[25];
+  strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+  return String(timestamp);
+}
+
+// ===== CURRENT SENSING FUNCTIONS =====
+
+float readCurrentRMS() {
+  /**
+   * Read AC current using RMS calculation - DEBUG VERSION
+   */
+  
+  unsigned long sum = 0;
+  unsigned long sumRaw = 0;  // Track raw ADC values
+  int minADC = 4095;
+  int maxADC = 0;
+  int samples = 0;
+  
+  // Sample the waveform rapidly
+  unsigned long startTime = micros();
+  
+  for (int i = 0; i < SAMPLES; i++) {
+    int rawADC = analogRead(CT_PIN);  // Read ADC (0-4095)
+    
+    // Track min/max for debugging
+    if (rawADC < minADC) minADC = rawADC;
+    if (rawADC > maxADC) maxADC = rawADC;
+    sumRaw += rawADC;
+    
+    // Convert to voltage and remove DC bias
+    float voltage = (rawADC * ADC_VOLTAGE / ADC_BITS) - 1.65;
+    
+    // Square the value and add to sum
+    sum += (voltage * voltage * 1000000);  // Multiply by 1M to avoid float precision issues
+    samples++;
+  }
+  
+  unsigned long endTime = micros();
+  float sampleTime = (endTime - startTime) / 1000.0;  // milliseconds
+  float actualSampleRate = (samples / sampleTime) * 1000.0;  // samples per second
+  
+  // Calculate averages and ranges
+  float avgRawADC = (float)sumRaw / samples;
+  float avgVoltage = avgRawADC * ADC_VOLTAGE / ADC_BITS;
+  
+  // Calculate RMS voltage
+  float meanSquare = (float)sum / samples / 1000000.0;  // Divide out our scaling factor
+  float rmsVoltage = sqrt(meanSquare);
+  
+  // Convert RMS voltage to RMS current using CT calibration
+  float rmsCurrent = rmsVoltage * CT_RATIO;
+  
+  // Debug output - EXPANDED
+  Serial.printf("RAW ADC: avg=%.1f min=%d max=%d (expected avg~2048)\n", avgRawADC, minADC, maxADC);
+  Serial.printf("Avg Voltage: %.3fV (expected ~1.65V)\n", avgVoltage);
+  Serial.printf("Samples: %d, Time: %.2fms, Rate: %.0f Hz, RMS Voltage: %.4fV, Current: %.2fA\n", 
+                samples, sampleTime, actualSampleRate, rmsVoltage, rmsCurrent);
+  Serial.println();
+  
+  return rmsCurrent;
+}
+
+float testADCBias() {
+  /**
+   * Test function to check ADC bias voltage
+   * Should read around 2048 (middle of 0-4095) when no current flowing
+   * Call this during setup to verify circuit is working
+   */
+  long sum = 0;
+  int samples = 100;
+  
+  for (int i = 0; i < samples; i++) {
+    sum += analogRead(CT_PIN);
+    delay(10);
+  }
+  
+  float avgADC = (float)sum / samples;
+  float avgVoltage = (avgADC * ADC_VOLTAGE) / ADC_BITS;
+  
+  Serial.printf("ADC Bias Test - Average ADC: %.1f (expected ~2048), Voltage: %.3fV (expected ~1.65V)\n", 
+                avgADC, avgVoltage);
+  
+  return avgVoltage;
+}
+
+// ===== END CURRENT SENSING FUNCTIONS =====
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // Initialize LED
+  pinMode(LED_PIN, OUTPUT);
+  currentLedMode = LED_BOOT;
+
+  // Configure ADC
+  analogReadResolution(12);  // 12-bit resolution (0-4095)
+  analogSetAttenuation(ADC_11db);  // Full 0-3.3V range
+  
+  // Test ADC bias (verify circuit is working)
+  Serial.println("\n===== Testing ADC Bias =====");
+  testADCBias();
+  Serial.println("============================\n");
+
+  // Check for config reset (BOOT button held during startup)
+  pinMode(0, INPUT_PULLUP);
+  Serial.println("Checking for config reset...");
+  Serial.println("Hold BOOT button for 3 seconds to reset WiFi and MQTT settings");
+
+  int buttonPressCount = 0;
+  for (int i = 0; i < 30; i++) {
+    if (digitalRead(0) == LOW) {
+      buttonPressCount++;
+    }
+    delay(100);
+  }
+
+  bool forceReset = (buttonPressCount > 20);
+
+  if (forceReset) {
+    Serial.println("\n!!! BOOT BUTTON DETECTED - RESETTING ALL SETTINGS !!!");
+    preferences.begin("mqtt", false);
+    preferences.clear();
+    preferences.end();
+
+    WiFiManager tempManager;
+    tempManager.resetSettings();
+
+    Serial.println("Settings reset complete. Restarting...");
+    delay(2000);
+    ESP.restart();
+  }
+
+  // TEMPORARILY DISABLED - Force set MQTT broker for testing
+  mqtt_server = "10.0.0.142";  // Your Mac's IP
+  Serial.println("Using hardcoded MQTT broker for testing: " + mqtt_server);
+  int bootFailures = 0;  // Dummy variable for disabled code
+  
+  // // Load saved MQTT broker and check boot failures
+  // preferences.begin("mqtt", false);
+  // mqtt_server = preferences.getString("broker", "");
+  // int bootFailures = preferences.getInt("bootfails", 0);
+  // preferences.end();
+
+  if (mqtt_server.length() > 0) {
+    Serial.println("Loaded MQTT broker from memory: " + mqtt_server);
+  } else {
+    Serial.println("No saved MQTT broker found - will prompt for configuration");
+  }
+
+  // TEMPORARILY DISABLED FOR TESTING
+  // if (bootFailures >= 3) {
+  //   Serial.println("\n!!! PERSISTENT CONNECTION FAILURES DETECTED !!!");
+  //   Serial.println("Failed to connect " + String(bootFailures) + " times in a row.");
+  //   Serial.println("Resetting WiFi and MQTT configuration...");
+
+  //   preferences.begin("mqtt", false);
+  //   preferences.clear();
+  //   preferences.end();
+
+  //   WiFiManager tempManager;
+  //   tempManager.resetSettings();
+
+  //   Serial.println("Settings cleared. Restarting into configuration mode...");
+  //   delay(3000);
+  //   ESP.restart();
+  // }
+
+  preferences.begin("mqtt", false);
+  preferences.putInt("bootfails", bootFailures + 1);
+  preferences.end();
+  Serial.println("Boot attempt: " + String(bootFailures + 1));
+
+  // WiFiManager setup
+  WiFiManager wifiManager;
+
+  // TEMPORARILY DISABLED WiFiManager setup
+  // if (mqtt_server.length() == 0) {
+  //   Serial.println("No MQTT broker configured - resetting WiFi to open configuration portal");
+  //   wifiManager.resetSettings();
+  // }
+
+  // wifiManager.setTitle("ESP32 Current Monitor Setup");
+  // wifiManager.setConfigPortalBlocking(true);
+  // wifiManager.setSaveConfigCallback(saveConfigCallback);
+
+  // if (mqtt_server.length() == 0) {
+  //   String brokerListHTML = discoverMQTTBrokers();
+  //   WiFiManagerParameter custom_html(brokerListHTML.c_str());
+  //   wifiManager.addParameter(&custom_html);
+  // }
+
+  // custom_mqtt_broker = new WiFiManagerParameter("mqtt", "MQTT Broker IP", mqtt_server.c_str(), 40);
+  // wifiManager.addParameter(custom_mqtt_broker);
+
+  // Serial.println("Connecting to WiFi...");
+  // if (!wifiManager.autoConnect("ESP32-CurrentMonitor")) {
+  //   Serial.println("Failed to connect to WiFi");
+  //   ESP.restart();
+  // }
+
+  Serial.println("Connected to WiFi!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  // NTP time sync
+  Serial.println("Syncing time with NTP server...");
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+  int syncAttempts = 0;
+  struct tm timeinfo;
+  while (!getLocalTime(&timeinfo) && syncAttempts < 10) {
+    delay(500);
+    syncAttempts++;
+  }
+
+  if (getLocalTime(&timeinfo)) {
+    timeIsSynced = true;
+    char timeStr[25];
+    strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    Serial.printf("Time synced: %s UTC\n", timeStr);
+  } else {
+    Serial.println("NTP sync failed - will use boot time fallback");
+    timeIsSynced = false;
+  }
+
+  // Save MQTT broker if provided
+  if (custom_mqtt_broker != nullptr) {
+    String selectedBroker = custom_mqtt_broker->getValue();
+    if (selectedBroker.length() > 0 && selectedBroker != mqtt_server) {
+      Serial.println("Saving MQTT broker: " + selectedBroker);
+      preferences.begin("mqtt", false);
+      preferences.putString("broker", selectedBroker);
+      preferences.end();
+      mqtt_server = selectedBroker;
+
+      Serial.println("Configuration saved. Restarting...");
+      delay(2000);
+      ESP.restart();
+    }
+  }
+
+  if (mqtt_server.length() == 0) {
+    Serial.println("\n!!! ERROR: No MQTT broker configured after portal !!!");
+    Serial.println("Please enter MQTT Broker IP in the portal");
+    delay(10000);
+    ESP.restart();
+  }
+
+  // Get MAC address
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  deviceMAC = "";
+  for(int i = 0; i < 6; i++) {
+    if(mac[i] < 16) deviceMAC += "0";
+    deviceMAC += String(mac[i], HEX);
+  }
+  deviceMAC.toUpperCase();
+
+  Serial.print("MAC Address: ");
+  Serial.println(deviceMAC);
+
+  baseTopic = "gooddecisions/" + deviceMAC;
+  Serial.print("Publishing to: ");
+  Serial.println(baseTopic);
+
+  // Setup MQTT
+  if (mqtt_server.length() > 0) {
+    Serial.println("Connecting to MQTT broker: " + mqtt_server);
+    client.setServer(mqtt_server.c_str(), mqtt_port);
+  } else {
+    Serial.println("ERROR: No MQTT broker configured!");
+  }
+
+  currentLedMode = LED_NORMAL;
+  lastLedToggle = millis();
+
+  Serial.println("Setup complete - monitoring current on GPIO34");
+}
+
+void loop() {
+  updateLED();
+
+  if (!client.connected()) {
+    reconnectMQTT();
+  }
+  client.loop();
+
+  // Read and publish current data
+  unsigned long now = millis();
+  if (now - lastPublish > publishInterval) {
+    lastPublish = now;
+
+    currentAmps = readCurrentRMS();
+    publishCurrentData();
+  }
+}
+
+void reconnectMQTT() {
+  static int failedAttempts = 0;
+  static unsigned long lastAttempt = 0;
+  unsigned long now = millis();
+
+  unsigned long retryInterval;
+  if (everConnected) {
+    retryInterval = (failedAttempts < 3) ? 10000 : 600000;
+  } else {
+    retryInterval = 5000;
+  }
+
+  if (now - lastAttempt < retryInterval) {
+    return;
+  }
+  lastAttempt = now;
+
+  Serial.print("Attempting MQTT connection...");
+
+  String clientId = "ESP32-" + deviceMAC;
+
+  if (client.connect(clientId.c_str())) {
+    Serial.println("connected");
+    failedAttempts = 0;
+    everConnected = true;
+    failureNotificationSent = false;
+
+    currentLedMode = LED_NORMAL;
+    lastLedToggle = millis();
+
+    preferences.begin("mqtt", false);
+    preferences.putInt("bootfails", 0);
+    preferences.end();
+
+    publishVersion();
+  } else {
+    Serial.print("failed, rc=");
+    Serial.print(client.state());
+
+    if (everConnected) {
+      failedAttempts++;
+
+      if (failedAttempts == 1) {
+        Serial.println(" will retry in 10 seconds");
+        currentLedMode = LED_FAST_RETRY;
+        lastLedToggle = millis();
+      } else if (failedAttempts < 3) {
+        Serial.println(" will retry in 10 seconds");
+      } else if (failedAttempts == 3) {
+        Serial.println("\n!!! MQTT BROKER UNREACHABLE - 3 FAILED ATTEMPTS !!!");
+        Serial.println("Switching to 10-minute retry interval");
+
+        currentLedMode = LED_SLOW_RETRY;
+        lastLedToggle = millis();
+
+        sendFailureNotification();
+
+        Serial.println(" will retry in 10 minutes");
+      } else {
+        Serial.println(" will retry in 10 minutes");
+      }
+    } else {
+      Serial.println(" will retry in 5 seconds");
+      failedAttempts++;
+
+      // TEMPORARILY DISABLED FOR TESTING
+      // if (failedAttempts >= 3) {
+      //   Serial.println("\n!!! MQTT CONNECTION FAILED 3 TIMES ON BOOT !!!");
+      //   Serial.println("Broker may be unreachable or incorrect.");
+      //   Serial.println("Clearing MQTT settings and opening configuration portal...");
+
+      //   preferences.begin("mqtt", false);
+      //   preferences.clear();
+      //   preferences.end();
+
+      //   WiFiManager tempManager;
+      //   tempManager.resetSettings();
+
+      //   Serial.println("Restarting to reconfigure...");
+      //   delay(3000);
+      //   ESP.restart();
+      // }
+    }
+  }
+}
+
+void publishVersion() {
+  String versionString = String("v") + MAJOR_VERSION + " " + BUILD_DATE + " " + BUILD_TIME;
+  String versionTopic = baseTopic + "/version";
+  client.publish(versionTopic.c_str(), versionString.c_str(), true);
+
+  Serial.println("Published firmware version: " + versionString);
+}
+
+void publishCurrentData() {
+  String timestamp = getCurrentTimestamp();
+
+  // Publish current
+  String currentTopic = baseTopic + "/current";
+  String currentValue = String(currentAmps, 2);  // 2 decimal places
+  client.publish(currentTopic.c_str(), currentValue.c_str());
+
+  // Publish timestamp
+  String timestampTopic = baseTopic + "/timestamp";
+  client.publish(timestampTopic.c_str(), timestamp.c_str());
+
+  Serial.println("Published - Current: " + currentValue + "A at " + timestamp);
+}
