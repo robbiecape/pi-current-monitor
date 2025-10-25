@@ -808,6 +808,17 @@ private:
       html += "<div><span class='label'>Buffer:</span>" + String(bufferFiles) + " files (" + String(bufferSize / 1024) + " KB)</div>";
       html += "</div>";
 
+      html += "<div class='section'>";
+      html += "<h2>Quick Links</h2>";
+      html += "<div>";
+      html += "<a href='/' class='btn'>Home</a> ";
+      html += "<a href='/config' class='btn'>MQTT Settings</a>";
+      html += "</div>";
+      html += "<div style='margin-top:10px;font-size:12px;color:#666;'>";
+      html += "To reset all settings: Hold BOOT button for 3 seconds";
+      html += "</div>";
+      html += "</div>";
+
       html += "</div></body></html>";
 
       webServer->send(200, "text/html", html);
