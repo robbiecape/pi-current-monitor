@@ -751,6 +751,7 @@ private:
   void setupWebServer() {
     webServer = new WebServer(WEB_SERVER_PORT);
 
+    // Main status page
     webServer->on("/", [this]() {
       String html = "<!DOCTYPE html><html><head>";
       html += "<meta charset='UTF-8'>";
@@ -762,6 +763,8 @@ private:
       html += ".section{margin:20px 0;padding:10px;background:#f9f9f9;border-radius:3px;}";
       html += ".label{font-weight:bold;display:inline-block;width:150px;}";
       html += ".status-ok{color:green;} .status-err{color:red;}";
+      html += ".btn{display:inline-block;padding:10px 20px;background:#007bff;color:white;text-decoration:none;border-radius:5px;margin:10px 5px;}";
+      html += ".btn:hover{background:#0056b3;}";
       html += "</style></head><body>";
 
       html += "<div class='container'>";
@@ -787,6 +790,7 @@ private:
       String mqttStatus = mqttClient.connected() ? "<span class='status-ok'>Connected ✓</span>" : "<span class='status-err'>Disconnected ✗</span>";
       html += "<div><span class='label'>Status:</span>" + mqttStatus + "</div>";
       html += "<div><span class='label'>Base Topic:</span>" + deviceName + "/</div>";
+      html += "<a href='/config' class='btn'>Change MQTT Server</a>";
       html += "</div>";
 
       html += "<div class='section'>";
@@ -807,6 +811,83 @@ private:
       html += "</div></body></html>";
 
       webServer->send(200, "text/html", html);
+    });
+
+    // MQTT configuration page
+    webServer->on("/config", [this]() {
+      String html = "<!DOCTYPE html><html><head>";
+      html += "<meta charset='UTF-8'>";
+      html += "<title>Configuration - " + deviceName + "</title>";
+      html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+      html += "<style>body{font-family:monospace;margin:20px;background:#f0f0f0;}";
+      html += ".container{background:white;padding:20px;border-radius:5px;max-width:600px;}";
+      html += "h1{border-bottom:2px solid #333;padding-bottom:10px;}";
+      html += "form{margin-top:20px;}";
+      html += "label{display:block;margin:10px 0 5px;font-weight:bold;}";
+      html += "input{width:100%;padding:8px;box-sizing:border-box;font-size:16px;}";
+      html += ".btn{display:inline-block;padding:10px 20px;background:#28a745;color:white;border:none;border-radius:5px;margin:10px 5px 0 0;cursor:pointer;font-size:16px;}";
+      html += ".btn:hover{background:#218838;}";
+      html += ".btn-back{background:#6c757d;}";
+      html += ".btn-back:hover{background:#5a6268;}";
+      html += ".warning{background:#fff3cd;border:1px solid #ffc107;padding:10px;border-radius:3px;margin:10px 0;}";
+      html += "</style></head><body>";
+
+      html += "<div class='container'>";
+      html += "<h1>MQTT Configuration</h1>";
+
+      html += "<div class='warning'>";
+      html += "<strong>Note:</strong> Changing MQTT server will disconnect current connection and reconnect to new server.";
+      html += "</div>";
+
+      html += "<form action='/save' method='POST'>";
+      html += "<label for='mqtt'>MQTT Broker IP Address:</label>";
+      html += "<input type='text' id='mqtt' name='mqtt' value='" + mqttServer + "' placeholder='10.0.0.142' required>";
+      html += "<button type='submit' class='btn'>Save & Reconnect</button>";
+      html += "<a href='/' class='btn btn-back'>Cancel</a>";
+      html += "</form>";
+
+      html += "</div></body></html>";
+
+      webServer->send(200, "text/html", html);
+    });
+
+    // Save MQTT configuration
+    webServer->on("/save", HTTP_POST, [this]() {
+      if (webServer->hasArg("mqtt")) {
+        String newMqttServer = webServer->arg("mqtt");
+
+        // Save to preferences
+        preferences.begin("sensor", false);
+        preferences.putString("mqttServer", newMqttServer);
+        preferences.end();
+
+        // Update current value
+        mqttServer = newMqttServer;
+
+        // Disconnect and reconnect
+        mqttClient.disconnect();
+
+        // Success page
+        String html = "<!DOCTYPE html><html><head>";
+        html += "<meta charset='UTF-8'>";
+        html += "<meta http-equiv='refresh' content='3;url=/'>";
+        html += "<title>Saved - " + deviceName + "</title>";
+        html += "<style>body{font-family:monospace;margin:20px;background:#f0f0f0;text-align:center;}";
+        html += ".container{background:white;padding:40px;border-radius:5px;max-width:400px;margin:50px auto;}";
+        html += ".success{color:#28a745;font-size:24px;margin:20px 0;}";
+        html += "</style></head><body>";
+        html += "<div class='container'>";
+        html += "<div class='success'>✓ MQTT Server Updated!</div>";
+        html += "<p>New broker: " + newMqttServer + "</p>";
+        html += "<p>Reconnecting... redirecting in 3 seconds</p>";
+        html += "</div></body></html>";
+
+        webServer->send(200, "text/html", html);
+
+        Serial.println("MQTT server updated to: " + newMqttServer);
+      } else {
+        webServer->send(400, "text/plain", "Missing MQTT parameter");
+      }
     });
 
     webServer->begin();
@@ -833,6 +914,48 @@ private:
   void publishWiFiSignal() {
     // Publish only WiFi signal quality
     mqttClient.publish((deviceName + "/status/wifi_signal").c_str(), getWiFiQuality(WiFi.RSSI()).c_str(), false);
+  }
+
+  void checkBootButton() {
+    // Check if BOOT button (GPIO0) is being held
+    // If held for 3 seconds continuously, reset all settings
+    static unsigned long buttonPressStart = 0;
+    static bool buttonWasPressed = false;
+
+    bool buttonPressed = (digitalRead(0) == LOW);
+
+    if (buttonPressed && !buttonWasPressed) {
+      // Button just pressed
+      buttonPressStart = millis();
+      buttonWasPressed = true;
+      Serial.println("BOOT button pressed - hold for 3 seconds to reset...");
+    }
+    else if (buttonPressed && buttonWasPressed) {
+      // Button still held - check duration
+      unsigned long holdDuration = millis() - buttonPressStart;
+
+      if (holdDuration >= 3000) {
+        // Held for 3+ seconds - RESET!
+        Serial.println("\n!!! BOOT BUTTON HELD 3 SECONDS - RESETTING ALL SETTINGS !!!");
+        Serial.println("Clearing WiFi and MQTT settings...");
+
+        preferences.begin("sensor", false);
+        preferences.clear();
+        preferences.end();
+
+        wifiManager.resetSettings();
+
+        Serial.println("Settings cleared. Restarting in 2 seconds...");
+        Serial.println("After restart, device will create WiFi AP for configuration.");
+        delay(2000);
+        ESP.restart();
+      }
+    }
+    else if (!buttonPressed && buttonWasPressed) {
+      // Button released before 3 seconds
+      buttonWasPressed = false;
+      Serial.println("BOOT button released");
+    }
   }
 
 public:
@@ -905,10 +1028,13 @@ public:
       }
     }
 
-    // TEMPORARILY DISABLED for brownout testing
-    // if (webServer) {
-    //   webServer->handleClient();
-    // }
+    // Handle web server requests
+    if (webServer) {
+      webServer->handleClient();
+    }
+
+    // Check for BOOT button held (continuous monitoring)
+    checkBootButton();
   }
 
   bool shouldPublish() {
