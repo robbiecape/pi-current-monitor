@@ -824,7 +824,7 @@ private:
       webServer->send(200, "text/html", html);
     });
 
-    // MQTT configuration page
+    // Complete configuration page
     webServer->on("/config", [this]() {
       String html = "<!DOCTYPE html><html><head>";
       html += "<meta charset='UTF-8'>";
@@ -834,26 +834,44 @@ private:
       html += ".container{background:white;padding:20px;border-radius:5px;max-width:600px;}";
       html += "h1{border-bottom:2px solid #333;padding-bottom:10px;}";
       html += "form{margin-top:20px;}";
-      html += "label{display:block;margin:10px 0 5px;font-weight:bold;}";
+      html += "label{display:block;margin:15px 0 5px;font-weight:bold;}";
       html += "input{width:100%;padding:8px;box-sizing:border-box;font-size:16px;}";
       html += ".btn{display:inline-block;padding:10px 20px;background:#28a745;color:white;border:none;border-radius:5px;margin:10px 5px 0 0;cursor:pointer;font-size:16px;}";
       html += ".btn:hover{background:#218838;}";
       html += ".btn-back{background:#6c757d;}";
       html += ".btn-back:hover{background:#5a6268;}";
       html += ".warning{background:#fff3cd;border:1px solid #ffc107;padding:10px;border-radius:3px;margin:10px 0;}";
+      html += ".info{background:#d1ecf1;border:1px solid #0c5460;padding:10px;border-radius:3px;margin:10px 0;font-size:14px;}";
+      html += "h3{margin-top:25px;border-bottom:1px solid #ddd;padding-bottom:5px;}";
       html += "</style></head><body>";
 
       html += "<div class='container'>";
-      html += "<h1>MQTT Configuration</h1>";
+      html += "<h1>Device Configuration</h1>";
 
       html += "<div class='warning'>";
-      html += "<strong>Note:</strong> Changing MQTT server will disconnect current connection and reconnect to new server.";
+      html += "<strong>Note:</strong> Changing WiFi settings will disconnect and reconnect to new network. ";
+      html += "Device will restart after saving.";
       html += "</div>";
 
       html += "<form action='/save' method='POST'>";
+
+      html += "<h3>Device Identity</h3>";
+      html += "<label for='name'>Device Name:</label>";
+      html += "<input type='text' id='name' name='name' value='" + deviceName + "' placeholder='my-sensor' required>";
+      html += "<div class='info'>This name will be used for MQTT topics and mDNS.</div>";
+
+      html += "<h3>WiFi Settings</h3>";
+      html += "<label for='ssid'>WiFi SSID:</label>";
+      html += "<input type='text' id='ssid' name='ssid' value='" + WiFi.SSID() + "' placeholder='MyNetwork' required>";
+      html += "<label for='pass'>WiFi Password:</label>";
+      html += "<input type='password' id='pass' name='pass' placeholder='Leave blank to keep current' autocomplete='new-password'>";
+      html += "<div class='info'>Leave password blank to keep existing password.</div>";
+
+      html += "<h3>MQTT Settings</h3>";
       html += "<label for='mqtt'>MQTT Broker IP Address:</label>";
       html += "<input type='text' id='mqtt' name='mqtt' value='" + mqttServer + "' placeholder='10.0.0.142' required>";
-      html += "<button type='submit' class='btn'>Save & Reconnect</button>";
+
+      html += "<button type='submit' class='btn'>Save & Restart</button>";
       html += "<a href='/' class='btn btn-back'>Cancel</a>";
       html += "</form>";
 
@@ -862,43 +880,64 @@ private:
       webServer->send(200, "text/html", html);
     });
 
-    // Save MQTT configuration
+    // Save complete configuration
     webServer->on("/save", HTTP_POST, [this]() {
-      if (webServer->hasArg("mqtt")) {
-        String newMqttServer = webServer->arg("mqtt");
-
-        // Save to preferences
-        preferences.begin("sensor", false);
-        preferences.putString("mqttServer", newMqttServer);
-        preferences.end();
-
-        // Update current value
-        mqttServer = newMqttServer;
-
-        // Disconnect and reconnect
-        mqttClient.disconnect();
-
-        // Success page
-        String html = "<!DOCTYPE html><html><head>";
-        html += "<meta charset='UTF-8'>";
-        html += "<meta http-equiv='refresh' content='3;url=/'>";
-        html += "<title>Saved - " + deviceName + "</title>";
-        html += "<style>body{font-family:monospace;margin:20px;background:#f0f0f0;text-align:center;}";
-        html += ".container{background:white;padding:40px;border-radius:5px;max-width:400px;margin:50px auto;}";
-        html += ".success{color:#28a745;font-size:24px;margin:20px 0;}";
-        html += "</style></head><body>";
-        html += "<div class='container'>";
-        html += "<div class='success'>✓ MQTT Server Updated!</div>";
-        html += "<p>New broker: " + newMqttServer + "</p>";
-        html += "<p>Reconnecting... redirecting in 3 seconds</p>";
-        html += "</div></body></html>";
-
-        webServer->send(200, "text/html", html);
-
-        Serial.println("MQTT server updated to: " + newMqttServer);
-      } else {
-        webServer->send(400, "text/plain", "Missing MQTT parameter");
+      if (!webServer->hasArg("mqtt") || !webServer->hasArg("name") || !webServer->hasArg("ssid")) {
+        webServer->send(400, "text/plain", "Missing required parameters");
+        return;
       }
+
+      String newName = webServer->arg("name");
+      String newSSID = webServer->arg("ssid");
+      String newPass = webServer->arg("pass");
+      String newMqttServer = webServer->arg("mqtt");
+
+      // Save to preferences
+      preferences.begin("sensor", false);
+      preferences.putString("deviceName", newName);
+      preferences.putString("mqttServer", newMqttServer);
+      preferences.end();
+
+      // Success page
+      String html = "<!DOCTYPE html><html><head>";
+      html += "<meta charset='UTF-8'>";
+      html += "<title>Saving Configuration...</title>";
+      html += "<style>body{font-family:monospace;margin:20px;background:#f0f0f0;text-align:center;}";
+      html += ".container{background:white;padding:40px;border-radius:5px;max-width:500px;margin:50px auto;}";
+      html += ".success{color:#28a745;font-size:24px;margin:20px 0;}";
+      html += ".info{margin:15px 0;padding:10px;background:#f9f9f9;border-radius:3px;}";
+      html += "</style></head><body>";
+      html += "<div class='container'>";
+      html += "<div class='success'>✓ Configuration Saved!</div>";
+      html += "<div class='info'><strong>Device Name:</strong> " + newName + "</div>";
+      html += "<div class='info'><strong>WiFi SSID:</strong> " + newSSID + "</div>";
+      html += "<div class='info'><strong>MQTT Broker:</strong> " + newMqttServer + "</div>";
+      html += "<p style='margin-top:30px;'>Device is restarting...</p>";
+      html += "<p>After restart, connect to new WiFi if changed.</p>";
+      html += "<p style='font-size:12px;color:#666;'>New IP will be: http://" + newName + ".local</p>";
+      html += "</div></body></html>";
+
+      webServer->send(200, "text/html", html);
+
+      Serial.println("Configuration updated:");
+      Serial.println("  Device Name: " + newName);
+      Serial.println("  WiFi SSID: " + newSSID);
+      Serial.println("  MQTT Server: " + newMqttServer);
+
+      // Save WiFi credentials via WiFiManager
+      // Only update password if provided
+      if (newPass.length() > 0) {
+        Serial.println("  WiFi Password: Updated");
+        WiFi.begin(newSSID.c_str(), newPass.c_str());
+      } else {
+        Serial.println("  WiFi Password: Unchanged");
+        // Try to connect with existing credentials
+        WiFi.begin(newSSID.c_str());
+      }
+
+      delay(2000);  // Give time for response to send
+      Serial.println("Restarting device...");
+      ESP.restart();
     });
 
     webServer->begin();
